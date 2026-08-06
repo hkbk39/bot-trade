@@ -23,10 +23,10 @@ services:
       # Chạy CẢ 2 bot trong 1 service
       - key: ENABLE_SENTINEL
         value: "1"
-      # Sentinel bắt đầu muộn hơn V74 30 phút để 2 bot không quét cùng lúc
-      # (tránh chạm trần 512MB RAM của gói free)
+      # Sentinel bắt đầu muộn hơn V74 15 phút: đủ để 2 bot không cùng ngốn RAM,
+      # mà không quá lâu (mỗi lần service ngủ dậy là đồng hồ này reset về 0)
       - key: SENTINEL_DELAY
-        value: "1800"
+        value: "900"
       # Giảm số coin Sentinel quét cho nhẹ RAM. Tăng lên 300 nếu thấy ổn.
       - key: LIMIT_SCAN
         value: "200"
