@@ -1,9 +1,10 @@
 name: Bot Sentinel (săn lazy coin để short)
 
 on:
-  schedule:
-    # Lệch 25 phút so với V74 để 2 bot không chạy chồng nhau
-    - cron: '25 * * * *'
+  # Cả 2 bot đã gộp chạy trên Render. Cron tắt để không gửi trùng tin Telegram.
+  # Bỏ dấu # ở 2 dòng schedule nếu muốn dùng Actions làm dự phòng.
+  # schedule:
+  #   - cron: '25 * * * *'
   workflow_dispatch:
 
 concurrency:

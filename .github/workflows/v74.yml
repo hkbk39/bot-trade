@@ -1,10 +1,12 @@
 name: Bot V74 (quét pump + squeeze)
 
 on:
-  schedule:
-    # Mỗi 1 giờ, phút thứ 5 (giờ UTC). GitHub hay chạy trễ 5-20 phút — bình thường.
-    - cron: '5 * * * *'
-  workflow_dispatch:        # cho phép bấm nút chạy tay để test
+  # Bản chạy chính đã chuyển sang Render (chạy 24/7 + có Flask API).
+  # Cron ở đây tắt đi để không gửi trùng tin Telegram.
+  # Muốn bật lại: bỏ dấu # ở 2 dòng schedule dưới, và tắt service trên Render.
+  # schedule:
+  #   - cron: '5 * * * *'
+  workflow_dispatch:        # bấm nút chạy tay khi cần test
 
 concurrency:
   group: bot-v74

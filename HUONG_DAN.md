@@ -4,7 +4,7 @@
 
 ## ⚠️ BƯỚC 0 — LÀM NGAY TRƯỚC MỌI THỨ KHÁC
 
-Token `8622608297:AAGqU5yHM3xrywyxw8Yo-E43iythO-buH4k` đang nằm hardcode trong 2 file gốc và **đã bị lộ** (nó xuất hiện trong file bạn gửi đi). Bất kỳ ai có token này đều có thể chiếm quyền bot của bạn.
+Token Telegram cũ nằm hardcode trong 2 file gốc (`Quecoinnendkmoi--run.py`, `Quetbankhongclaude--run.py`) và **đã bị lộ**. Bất kỳ ai có token đó đều chiếm được quyền bot của bạn.
 
 **Thu hồi và lấy token mới:**
 
@@ -85,7 +85,7 @@ git remote add origin https://github.com/<ten-github-cua-ban>/bot-trade.git
 git push -u origin main
 ```
 
-> **Kiểm tra bắt buộc:** sau khi push, mở repo trên web, bấm vào `bot_v74.py` và `bot_sentinel.py`, dùng Ctrl+F tìm chuỗi `8622608297`. Phải **không tìm thấy**.
+> **Kiểm tra bắt buộc:** sau khi push, mở repo trên web, bấm vào `bot_v74.py` và `bot_sentinel.py`, dùng Ctrl+F tìm chuỗi `:AAG`. Phải **không tìm thấy**.
 
 ---
 

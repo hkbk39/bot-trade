@@ -30,6 +30,13 @@ COMMON = '''
 import os as _os
 import sys as _sys
 
+# Doc file .env neu co (chi chay o may local; tren GitHub/Render thi bo qua)
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv()
+except ImportError:
+    pass
+
 
 def _env(name, default=None, required=False):
     v = _os.environ.get(name, default)
@@ -209,6 +216,12 @@ def _save_state(level):
 _prev_btc_level = _load_state()
 ''', 1)
 must("_load_state()" in s, "sentinel: khong tim thay _prev_btc_level")
+
+# Cho phep giam so coin quet qua bien moi truong (RAM tren Render free chi 512MB)
+s = re.sub(r'LIMIT_SCAN(\s*)=(\s*)\d+',
+           lambda m: f'LIMIT_SCAN{m.group(1)}={m.group(2)}int(_os.environ.get("LIMIT_SCAN", 300))',
+           s, count=1)
+must('_os.environ.get("LIMIT_SCAN"' in s, "sentinel: khong tim thay LIMIT_SCAN")
 
 # Bao loi ro khi Telegram tu choi (token sai / chat_id sai)
 s = s.replace("""        requests.post(url, json={

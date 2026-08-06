@@ -16,7 +16,12 @@ from datetime import datetime
 # Hai module bot không tự khởi động gì khi được import
 # (mọi thứ đều nằm trong khối `if __name__ == "__main__"`).
 import bot_v74
-import bot_sentinel
+
+# Sentinel mặc định TẮT ở đây vì nó đã chạy trên GitHub Actions (cron 1h).
+# Bật lại bằng biến môi trường ENABLE_SENTINEL=1 nếu muốn gộp cả 2 vào Render.
+ENABLE_SENTINEL = os.environ.get("ENABLE_SENTINEL", "0") == "1"
+if ENABLE_SENTINEL:
+    import bot_sentinel
 
 V74_INTERVAL      = int(os.environ.get("V74_INTERVAL", 3600))       # giây
 SENTINEL_INTERVAL = int(os.environ.get("SENTINEL_INTERVAL", 3600))  # giây
@@ -53,10 +58,11 @@ def _root():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  RUNNER GỘP — V74 + SENTINEL + Flask API")
-    print(f"  API:      http://0.0.0.0:{PORT}/signals")
+    print("  RUNNER — V74 + Flask API")
+    print(f"  API:       http://0.0.0.0:{PORT}/signals")
     print(f"  Keepalive: http://0.0.0.0:{PORT}/health")
-    print(f"  Chu kỳ:   V74 {V74_INTERVAL // 60}' | Sentinel {SENTINEL_INTERVAL // 60}'")
+    print(f"  Chu kỳ V74: {V74_INTERVAL // 60} phút")
+    print(f"  Sentinel:   {'BAT (gop chung)' if ENABLE_SENTINEL else 'TAT (chay tren GitHub Actions)'}")
     print("=" * 60)
 
     threading.Thread(
@@ -64,11 +70,12 @@ if __name__ == "__main__":
         daemon=True, name="v74",
     ).start()
 
-    threading.Thread(
-        target=_loop,
-        args=("SENTINEL", bot_sentinel.run_sentinel, SENTINEL_INTERVAL, SENTINEL_DELAY),
-        daemon=True, name="sentinel",
-    ).start()
+    if ENABLE_SENTINEL:
+        threading.Thread(
+            target=_loop,
+            args=("SENTINEL", bot_sentinel.run_sentinel, SENTINEL_INTERVAL, SENTINEL_DELAY),
+            daemon=True, name="sentinel",
+        ).start()
 
     # Flask giữ tiến trình chính sống
     bot_v74.flask_app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
