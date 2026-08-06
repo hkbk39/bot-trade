@@ -30,6 +30,9 @@ services:
       # Giảm số coin Sentinel quét cho nhẹ RAM. Tăng lên 300 nếu thấy ổn.
       - key: LIMIT_SCAN
         value: "200"
+      # Bot tự ping mình mỗi 10 phút để Render không cho service ngủ
+      - key: PING_INTERVAL
+        value: "600"
       # 2 biến dưới đây KHÔNG điền ở đây — vào Render > Environment nhập tay
       - key: TELEGRAM_TOKEN
         sync: false

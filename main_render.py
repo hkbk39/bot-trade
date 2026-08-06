@@ -29,6 +29,34 @@ SENTINEL_DELAY    = int(os.environ.get("SENTINEL_DELAY", 300))      # lệch gi�
 PORT              = int(os.environ.get("PORT", 5000))
 
 
+def _self_ping():
+    """Tự gọi vào URL công khai của chính mình để Render không cho service ngủ.
+
+    Render cấp sẵn biến RENDER_EXTERNAL_URL. Request đi ra internet rồi vòng
+    về qua load balancer nên được tính là traffic thật — khác với health check
+    nội bộ (10.x.x.x) vốn KHÔNG ngăn được spin-down.
+    """
+    import urllib.request
+
+    url = os.environ.get("SELF_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        print("[PING] Khong co RENDER_EXTERNAL_URL — bo qua tu ping")
+        return
+
+    url = url.rstrip("/") + "/health"
+    interval = int(os.environ.get("PING_INTERVAL", 600))   # 10 phút < 15 phút
+    print(f"[PING] Tu ping {url} moi {interval}s")
+
+    time.sleep(60)   # chờ Flask sẵn sàng
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                print(f"[PING] {r.status} lúc {datetime.now():%H:%M:%S}")
+        except Exception as e:
+            print(f"[PING] lỗi: {e}")
+        time.sleep(interval)
+
+
 def _loop(name, fn, interval, first_delay=0):
     if first_delay:
         print(f"[{name}] chờ {first_delay}s rồi bắt đầu...")
@@ -64,6 +92,8 @@ if __name__ == "__main__":
     print(f"  Chu kỳ V74: {V74_INTERVAL // 60} phút")
     print(f"  Sentinel:   {'BAT (gop chung)' if ENABLE_SENTINEL else 'TAT (chay tren GitHub Actions)'}")
     print("=" * 60)
+
+    threading.Thread(target=_self_ping, daemon=True, name="selfping").start()
 
     threading.Thread(
         target=_loop, args=("V74", bot_v74.run_v74_standard, V74_INTERVAL, 0),
