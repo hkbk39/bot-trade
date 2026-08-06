@@ -133,11 +133,13 @@ exchange = _build_exchange()
 def send_msg(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={
+        _r = requests.post(url, json={
             'chat_id':    CHAT_ID,
             'text':       text,
             'parse_mode': 'Markdown',
         }, timeout=15)
+        if _r.status_code != 200:
+            print(f"  [TELEGRAM LOI HTTP {_r.status_code}] {_r.text[:300]}")
     except Exception as e:
         print(f"  [TG lỗi] {e}")
 
@@ -918,6 +920,16 @@ if __name__ == "__main__":
     print("  SENTINEL v6.1 - LAZY COIN SHORT HUNTER")
     print(f"  Che do: {'QUET 1 LAN (CI)' if RUN_ONCE else 'CHAY LIEN TUC'}")
     print("=" * 56)
+
+    # Preflight: neu san chan IP (loi 451) thi FAIL RO, khong "xanh gia"
+    if RUN_ONCE:
+        try:
+            _n = len(exchange.load_markets())
+            print(f"  Ket noi san OK - {_n} markets")
+        except Exception as _e:
+            print(f"[FATAL] Khong ket noi duoc san: {_e}")
+            print("[FATAL] Neu la loi 451 -> doi Variable EXCHANGE_ID sang kucoin/okx/bybit/gateio")
+            _sys.exit(1)
 
     if RUN_ONCE:
         run_sentinel()

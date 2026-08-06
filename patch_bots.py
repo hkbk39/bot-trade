@@ -111,6 +111,15 @@ s = s.replace(
     "import mplfinance as mpf"
 )
 
+# Bao loi ro khi Telegram tu choi (token sai / chat_id sai)
+s = re.sub(
+    r'( +)requests\.post\(url, json=payload, timeout=10\)',
+    lambda m: f"{m.group(1)}_r = requests.post(url, json=payload, timeout=10)\n"
+              f"{m.group(1)}if _r.status_code != 200:\n"
+              f"{m.group(1)}    print(f\"[TELEGRAM LOI HTTP {{_r.status_code}}] {{_r.text[:300]}}\")",
+    s, count=1
+)
+
 must('if __name__ == "__main__":' in s, "v74: khong tim thay entry point")
 s = s[:s.index('if __name__ == "__main__":')] + '''if __name__ == "__main__":
     RUN_ONCE   = _os.environ.get("RUN_ONCE", "0") == "1"
@@ -122,6 +131,16 @@ s = s[:s.index('if __name__ == "__main__":')] + '''if __name__ == "__main__":
     print(f"  Flask API: {'BAT - port ' + str(FLASK_PORT) if ENABLE_API else 'TAT'}")
     print(f"  Luu lich su: {MAX_HISTORY} lan quet gan nhat")
     print("=" * 50)
+
+    # Preflight: neu san chan IP (loi 451) thi FAIL RO, khong "xanh gia"
+    if RUN_ONCE:
+        try:
+            _n = len(exchange.load_markets())
+            print(f"  Ket noi san OK - {_n} markets")
+        except Exception as _e:
+            print(f"[FATAL] Khong ket noi duoc san: {_e}")
+            print("[FATAL] Neu la loi 451 -> doi Variable EXCHANGE_ID sang kucoin/okx/bybit/gateio")
+            _sys.exit(1)
 
     if ENABLE_API and not RUN_ONCE:
         flask_thread = threading.Thread(target=run_flask, daemon=True)
@@ -191,6 +210,19 @@ _prev_btc_level = _load_state()
 ''', 1)
 must("_load_state()" in s, "sentinel: khong tim thay _prev_btc_level")
 
+# Bao loi ro khi Telegram tu choi (token sai / chat_id sai)
+s = s.replace("""        requests.post(url, json={
+            'chat_id':    CHAT_ID,
+            'text':       text,
+            'parse_mode': 'Markdown',
+        }, timeout=15)""", """        _r = requests.post(url, json={
+            'chat_id':    CHAT_ID,
+            'text':       text,
+            'parse_mode': 'Markdown',
+        }, timeout=15)
+        if _r.status_code != 200:
+            print(f"  [TELEGRAM LOI HTTP {_r.status_code}] {_r.text[:300]}")""", 1)
+
 s = s.replace("        _prev_btc_level = btc_level\n",
               "        _prev_btc_level = btc_level\n        _save_state(btc_level)\n")
 s = s.replace("        _prev_btc_level = 0\n\n    print(",
@@ -203,6 +235,16 @@ s = s[:s.index('if __name__ == "__main__":')] + '''if __name__ == "__main__":
     print("  SENTINEL v6.1 - LAZY COIN SHORT HUNTER")
     print(f"  Che do: {'QUET 1 LAN (CI)' if RUN_ONCE else 'CHAY LIEN TUC'}")
     print("=" * 56)
+
+    # Preflight: neu san chan IP (loi 451) thi FAIL RO, khong "xanh gia"
+    if RUN_ONCE:
+        try:
+            _n = len(exchange.load_markets())
+            print(f"  Ket noi san OK - {_n} markets")
+        except Exception as _e:
+            print(f"[FATAL] Khong ket noi duoc san: {_e}")
+            print("[FATAL] Neu la loi 451 -> doi Variable EXCHANGE_ID sang kucoin/okx/bybit/gateio")
+            _sys.exit(1)
 
     if RUN_ONCE:
         run_sentinel()
