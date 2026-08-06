@@ -1,0 +1,40 @@
+name: Bot V74 (quét pump + squeeze)
+
+on:
+  schedule:
+    # Mỗi 1 giờ, phút thứ 5 (giờ UTC). GitHub hay chạy trễ 5-20 phút — bình thường.
+    - cron: '5 * * * *'
+  workflow_dispatch:        # cho phép bấm nút chạy tay để test
+
+concurrency:
+  group: bot-v74
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Lấy code
+        uses: actions/checkout@v4
+
+      - name: Cài Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cài thư viện
+        run: pip install -r requirements.txt
+
+      - name: Chạy bot
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EXCHANGE_ID:      ${{ vars.EXCHANGE_ID || 'binance' }}
+          BINANCE_DATA_MIRROR: ${{ vars.BINANCE_DATA_MIRROR || '0' }}
+          RUN_ONCE:   '1'     # quét 1 lần rồi thoát
+          ENABLE_API: '0'     # Actions không host được Flask
+          TZ: Asia/Ho_Chi_Minh
+        run: python bot_v74.py

@@ -1,0 +1,27 @@
+# Blueprint cho Render — Dashboard > New > Blueprint > chọn repo này.
+# Region singapore để tránh Binance chặn IP Mỹ (lỗi 451).
+services:
+  - type: web
+    name: bot-trade
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main_render.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: TZ
+        value: Asia/Ho_Chi_Minh
+      - key: EXCHANGE_ID
+        value: binance
+      - key: RUN_ONCE
+        value: "0"
+      - key: ENABLE_API
+        value: "1"
+      # 2 biến dưới đây KHÔNG điền ở đây — vào Render > Environment nhập tay
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

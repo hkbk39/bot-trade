@@ -1,0 +1,25 @@
+name: Giữ Render không ngủ
+
+# Render free tier ngủ sau 15 phút không có request.
+# Workflow này ping mỗi 10 phút để service luôn thức.
+# Chỉ bật khi bạn deploy trên Render — nếu không dùng thì xoá file này.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping health endpoint
+        env:
+          URL: ${{ vars.RENDER_URL }}   # ví dụ https://bot-trade.onrender.com
+        run: |
+          if [ -z "$URL" ]; then
+            echo "Chưa đặt biến RENDER_URL — bỏ qua."
+            exit 0
+          fi
+          curl -s -o /dev/null -w "HTTP %{http_code}\n" --max-time 90 "$URL/health"

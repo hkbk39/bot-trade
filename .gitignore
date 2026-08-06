@@ -1,0 +1,26 @@
+# TUYỆT ĐỐI không commit file chứa token
+.env
+.env.*
+!.env.example
+*secret*
+*token*.txt
+
+# Ảnh chart bot tự sinh
+*.png
+!docs/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# State
+sentinel_state.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
