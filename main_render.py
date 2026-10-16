@@ -70,8 +70,19 @@ def _loop(name, fn, interval, first_delay=0):
         except Exception as e:
             print(f"[{name}] ✖ LỖI: {e}")
             traceback.print_exc()
-        print(f"[{name}] ⏸ nghỉ {interval // 60} phút")
-        time.sleep(interval)
+
+        # [PATCH 2026-10-16b] Dang bi Binance ban: chi cho toi luc het ban (+60s)
+        # thay vi ngu du 2 tieng -> bot tu quet lai ngay khi duoc mo ban.
+        wait = interval
+        try:
+            if hasattr(bot_v74, "_ban_left_sec"):
+                left = bot_v74._ban_left_sec()
+                if left > 0:
+                    wait = min(interval, left + 60)
+        except Exception:
+            wait = interval
+        print(f"[{name}] ⏸ nghỉ {wait // 60} phút")
+        time.sleep(wait)
 
 
 # Endpoint để dịch vụ ping giữ service không ngủ (Render free ngủ sau 15' không có request)
