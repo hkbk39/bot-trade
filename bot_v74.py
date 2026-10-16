@@ -79,6 +79,9 @@ scan_status    = "Chưa quét"
 
 exchange = _build_exchange()
 
+# [PATCH 2026-10-16] Chan doan: dem so cap quet duoc / so loi de khong con "0 tin hieu" vo hinh
+scan_debug     = {}
+
 # ============================================================
 # FLASK API SERVER
 # ============================================================
@@ -92,8 +95,19 @@ def get_signals():
         "last_scan":   last_scan_time,
         "status":      scan_status,
         "total_found": len(latest_signals),
+        "debug":       scan_debug,          # [PATCH 2026-10-16] so cap quet / so loi
         # MỚI: Android dùng history để bù các lần miss
         "history":     scan_history
+    })
+
+@flask_app.route('/debug')
+def get_debug():
+    """[PATCH 2026-10-16] Chan doan tu xa: quet duoc bao nhieu cap, loi bao nhieu, mau loi."""
+    return jsonify({
+        "status":      scan_status,
+        "last_scan":   last_scan_time,
+        "history_len": len(scan_history),
+        "debug":       scan_debug,
     })
 
 @flask_app.route('/health')
@@ -169,6 +183,9 @@ def run_v74_standard():
     scan_status = f"Đang quét... ({scan_time_str})"
 
     found_signals = []
+    dbg = {"start": scan_time_str, "pairs": 0, "scanned": 0, "errors": 0,
+           "err_samples": [], "stage": "start", "outer_error": ""}
+    scan_debug = dbg
 
     try:
         markets    = exchange.load_markets()
@@ -178,11 +195,14 @@ def run_v74_standard():
         ]
 
         total = len(spot_pairs)
+        dbg["pairs"] = total
+        dbg["stage"] = "scanning"
         print(f"📋 Tổng số cặp USDT: {total}")
 
         for idx, symbol in enumerate(spot_pairs, 1):
             try:
                 ohlcv   = exchange.fetch_ohlcv(symbol, '4h', limit=150)
+                dbg["scanned"] += 1
                 df      = pd.DataFrame(ohlcv)
                 close_p = df[4].apply(pd.to_numeric)
                 high_p  = df[2].apply(pd.to_numeric)
@@ -249,7 +269,12 @@ def run_v74_standard():
 
                 time.sleep(0.01)
 
-            except Exception:
+            except Exception as _e:
+                # [PATCH 2026-10-16] Truoc day cho nay nuot loi im lang -> sua: dem + luu mau loi
+                dbg["errors"] += 1
+                _m = f"{type(_e).__name__}: {_e}"[:200]
+                if _m not in dbg["err_samples"] and len(dbg["err_samples"]) < 5:
+                    dbg["err_samples"].append(_m)
                 continue
 
         # ── Tạo danh sách signal JSON cho lần quét này ──────────
@@ -315,6 +340,12 @@ def run_v74_standard():
             send_telegram_msg(msg)
 
     except Exception as e:
+        try:
+            dbg["stage"] = "outer_error"
+            dbg["outer_error"] = f"{type(e).__name__}: {e}"[:300]
+            scan_debug = dbg
+        except Exception:
+            pass
         scan_status = f"Lỗi: {e}"
         print(f"[Lỗi quét] {e}")
 
