@@ -55,11 +55,16 @@ class BinanceKlineFeed:
 
     def __init__(self, interval="4h", limit=150, rest=None, symbols=None,
                  base_url=None, backfill_rpm=60.0, min_candles=60,
-                 stale_sec=180, recv_timeout=30, max_streams=1024, min_ready=10):
+                 stale_sec=180, recv_timeout=30, max_streams=1024, min_ready=10,
+                 sub_batch=80, sub_gap=0.4):
         self.interval  = interval
         self.limit     = int(limit)
         self.min_candles = int(min_candles)
         self.min_ready = int(min_ready)
+        # Binance ngắt kết nối nếu client gửi quá 5 bản tin/giây -> SUBSCRIBE
+        # phải giãn nhịp (80 stream/lệnh, cách nhau 0.4s = 2.5 lệnh/giây)
+        self.sub_batch = int(sub_batch)
+        self.sub_gap   = float(sub_gap)
         self.rest      = rest
         self.base      = (base_url
                           or os.environ.get("WS_BASE_URL", "wss://stream.binance.com:9443")).rstrip("/")
@@ -165,55 +170,124 @@ class BinanceKlineFeed:
     #  1) KHÁM PHÁ SYMBOL (không tốn weight)
     # ------------------------------------------------------------
     def _discover_loop(self):
+        """Lấy danh sách cặp USDT.
+
+        Ưu tiên 1 request REST load_markets (weight ~20 — không đáng kể so với
+        ~1000 weight mà quét 500 cặp bằng fetch_ohlcv cần) vì đây là cách DUY NHẤT
+        lấy đủ danh sách. !miniTicker@arr chỉ là đường dự phòng (Binance phát mảng
+        theo kiểu cuốn chiếu: gom 20s được ~300, 40s được ~400 cặp).
+        """
         if self._symbols:
             return
-        for attempt in range(1, 6):
-            if self._stop:
-                return
-            try:
-                syms = self._discover_via_ws()
-                if syms:
-                    with self._lock:
-                        self._symbols = syms[: self.max_streams]
-                    print(f"[WS] Khám phá được {len(self._symbols)} cặp USDT qua !miniTicker@arr")
+        syms = self._discover_via_rest()
+        if not syms:
+            for attempt in range(1, 4):
+                if self._stop:
                     return
-            except Exception as e:
-                self._record_error(f"khám phá symbol lỗi: {e}")
-            time.sleep(min(30, 5 * attempt))
+                try:
+                    syms = self._discover_via_ws(seconds=30)
+                except Exception as e:
+                    self._record_error(f"khám phá symbol lỗi: {e}")
+                if syms and len(syms) >= 50:
+                    break
+                syms = []
+                time.sleep(min(30, 5 * attempt))
+        if syms:
+            with self._lock:
+                self._symbols = syms[: self.max_streams]
+            print(f"[WS] Danh sách {len(self._symbols)} cặp USDT đã sẵn sàng")
+        else:
+            self._record_error("chưa lấy được danh sách symbol nào")
 
-        # Fallback: 1 request REST load_markets (weight nhỏ, chấp nhận được)
+    def _discover_via_rest(self):
+        """1 request REST load_markets — chuẩn và rẻ. Không được thì trả []."""
+        if self.rest is None:
+            return []
         try:
-            if self.rest is not None:
-                mk = self.rest.load_markets()
-                syms = sorted(
-                    s for s, m in mk.items()
-                    if m.get("spot") and m.get("quote") == "USDT" and m.get("active")
-                    and not s.replace("/", "").endswith(_BAD_SUFFIX)
-                )
-                with self._lock:
-                    self._symbols = syms[: self.max_streams]
-                print(f"[WS] Khám phá qua REST: {len(self._symbols)} cặp USDT")
+            mk = self.rest.load_markets()
+            syms = sorted(
+                s for s, m in mk.items()
+                if m.get("spot") and m.get("quote") == "USDT" and m.get("active")
+                and not s.replace("/", "").endswith(_BAD_SUFFIX)
+            )
+            print(f"[WS] Khám phá qua REST: {len(syms)} cặp USDT")
+            return syms
         except Exception as e:
-            self._record_error(f"khám phá symbol qua REST lỗi: {e}")
+            m = f"{type(e).__name__}: {e}"
+            if self._note_ban(m):
+                print("[WS] REST đang bị ban — dùng !miniTicker@arr tạm thời")
+            else:
+                self._record_error(f"khám phá qua REST lỗi: {m}")
+            return []
 
-    def _discover_via_ws(self):
+    def refresh_symbols(self):
+        """[Dinh ky] Bổ sung danh sách symbol nếu đang thiếu (vd lúc bị ban).
+
+        Có symbol mới -> đóng kết nối WS để vòng nối lại subscribe đủ stream.
+        """
+        with self._lock:
+            cur = list(self._symbols)
+        if len(cur) >= 400:
+            return False
+        new = self._discover_via_rest()
+        if not new:
+            return False
+        if set(new) == set(cur):
+            return False
+        with self._lock:
+            self._symbols = new[: self.max_streams]
+        print(f"[WS] Cập nhật danh sách: {len(cur)} -> {len(new)} cặp — subscribe lại")
+        self._reconnects += 1
+        try:
+            if self._ws is not None:
+                self._ws.close()
+        except Exception:
+            pass
+        return True
+
+    def _discover_via_ws(self, seconds=8):
+        """Gom danh sách cặp USDT từ !miniTicker@arr.
+
+        LƯU Ý: Binance CẮT NHỎ bản tin mảng khi payload lớn — đọc 1 bản tin duy
+        nhất chỉ được một mảnh (từng thấy đúng 85 cặp thay vì ~500). Vì vậy phải
+        gom liên tục trong vài giây cho tới khi danh sách không tăng nữa.
+        """
         url = f"{self.base}/ws/!miniTicker@arr"
         ws = websocket.create_connection(url, timeout=20)
+        seen, seen_set = [], set()
+        last_count, stable = -1, 0
+        deadline = time.time() + seconds
         try:
-            raw = ws.recv()
+            while time.time() < deadline:
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    continue
+                if not raw:
+                    break
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                items = data.get("data", data) if isinstance(data, dict) else data
+                for it in items or []:
+                    s = (it or {}).get("s") or ""
+                    if s.endswith("USDT") and not s.endswith(_BAD_SUFFIX) and s not in seen_set:
+                        seen_set.add(s)
+                        seen.append(s)
+                if len(seen) == last_count:
+                    stable += 1
+                    if stable >= 3 and len(seen) >= 50:
+                        break
+                else:
+                    stable = 0
+                    last_count = len(seen)
         finally:
             try:
                 ws.close()
             except Exception:
                 pass
-        data = json.loads(raw)
-        items = data.get("data", data) if isinstance(data, dict) else data
-        syms = []
-        for it in items or []:
-            s = (it or {}).get("s") or ""
-            if s.endswith("USDT") and not s.endswith(_BAD_SUFFIX) and s not in syms:
-                syms.append(s)
-        return syms
+        return seen
 
     # ------------------------------------------------------------
     #  2) BACKFILL LỊCH SỬ — chậm, có kiểm soát
@@ -265,6 +339,12 @@ class BinanceKlineFeed:
         with self._lock:
             left = len([s for s in self._symbols if s not in self._backfilled])
         print(f"[WS] Nạp lịch sử xong ({len(self._backfilled)} cặp, còn {left})")
+        # Nạp xong tức là REST đã thông (hết ban) -> bổ sung danh sách symbol
+        # nếu lúc khởi động phải dùng danh sách tạm từ !miniTicker@arr
+        try:
+            self.refresh_symbols()
+        except Exception as e:
+            self._record_error(f"cập nhật symbol sau backfill: {e}")
 
     # ------------------------------------------------------------
     #  3) KẾT NỐI WS + SUBSCRIBE KLINE
@@ -298,15 +378,17 @@ class BinanceKlineFeed:
                                          enable_multithread=True)
         self._ws = ws
         sent = 0
-        for batch in _chunks(syms, 100):
+        n_batches = 0
+        for batch in _chunks(syms, self.sub_batch):
             params = [f"{s.replace('/', '').lower()}@kline_{self.interval}" for s in batch]
             ws.send(json.dumps({"method": "SUBSCRIBE", "params": params, "id": 1}))
             sent += len(params)
-            time.sleep(0.05)
+            n_batches += 1
+            time.sleep(self.sub_gap)   # giu duoi 5 ban tin/giay theo gioi han Binance
         self._connected = True
         self._connected_once = True
         self._last_msg = time.time()
-        self._state = f"đã kết nối — {sent} stream kline {self.interval}"
+        self._state = f"đã kết nối — {sent} stream kline {self.interval} ({n_batches} lệnh subscribe)"
         print(f"[WS] {self._state}")
 
         while not self._stop:
@@ -322,7 +404,11 @@ class BinanceKlineFeed:
                     raise RuntimeError(f"im lặng {int(idle)}s — nối lại")
                 continue
             if raw is None or raw == "":
-                raise RuntimeError("server đóng kết nối")
+                raise RuntimeError(
+                    "server đóng kết nối (close_status="
+                    f"{getattr(ws, 'close_status', None)}, "
+                    f"reason={getattr(ws, 'close_reason', '')!r})"
+                )
             self._last_msg = time.time()
             self._msg_count += 1
             try:
@@ -347,6 +433,7 @@ class BinanceKlineFeed:
     #  4) WATCHDOG
     # ------------------------------------------------------------
     def _watchdog_loop(self):
+        last_refresh = time.time()
         while not self._stop:
             time.sleep(15)
             try:
@@ -361,6 +448,10 @@ class BinanceKlineFeed:
                                 ws.close()
                             except Exception:
                                 pass
+                # Mỗi 30 phút: nếu danh sách symbol còn thiếu thì bổ sung
+                if time.time() - last_refresh > 1800:
+                    last_refresh = time.time()
+                    self.refresh_symbols()
             except Exception as e:
                 self._record_error(f"watchdog: {e}")
 
