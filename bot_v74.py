@@ -60,7 +60,10 @@ CHAT_ID = _env("TELEGRAM_CHAT_ID", required=True)
 
 SCAN_DAYS        = 16
 MIN_GROWTH_PCT   = 40
-MAX_DAYS_FROM_PEAK = 9
+# [PATCH 2026-10-16c] Chi show dinh trong 5 ngay tro lai; dinh cu hon => bo qua
+# (coin nen lau ngay da chuyen downtrend, mau thuan voi bot sell)
+MAX_DAYS_FROM_PEAK = float(_os.environ.get("MAX_DAYS_FROM_PEAK", "5"))
+MIN_DAYS_FROM_PEAK = float(_os.environ.get("MIN_DAYS_FROM_PEAK", "1.5"))
 MIN_PULLBACK_PCT = 30
 SQUEEZE_THRESHOLD = 0.3
 VOL_EXHAUST_RATIO = 0.9
@@ -284,7 +287,8 @@ def run_v74_standard():
                     + (datetime.now() - peak_time).seconds / 86400
                 )
 
-                if days_since_peak > MAX_DAYS_FROM_PEAK or days_since_peak < 1.5:
+                # [PATCH 2026-10-16c] Dinh phai nam trong khoang MIN..MAX ngay tro lai
+                if days_since_peak > MAX_DAYS_FROM_PEAK or days_since_peak < MIN_DAYS_FROM_PEAK:
                     continue
 
                 search_bottom_start = max(0, idx_peak - 60)
