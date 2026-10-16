@@ -38,5 +38,8 @@ jobs:
           BINANCE_DATA_MIRROR: ${{ vars.BINANCE_DATA_MIRROR || '0' }}
           RUN_ONCE:   '1'     # quét 1 lần rồi thoát
           ENABLE_API: '0'     # Actions không host được Flask
+          # [2026-10-16d] CI chạy 1 lần/IP riêng nên dùng REST cho nhanh;
+          # muốn CI cũng dùng WebSocket thì đổi thành 'ws'
+          V74_DATA_SOURCE: 'rest'
           TZ: Asia/Ho_Chi_Minh
         run: python bot_v74.py

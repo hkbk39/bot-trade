@@ -33,6 +33,17 @@ services:
       # Bot tự ping mình mỗi 10 phút để Render không cho service ngủ
       - key: PING_INTERVAL
         value: "600"
+      # [2026-10-16d] Nguồn dữ liệu WebSocket: Binance ĐẨY nến 4H về, KHÔNG tốn
+      # request weight => không còn bị "418 IP banned". "auto" = WS, chỉ quay về
+      # REST nếu WebSocket hỏng hẳn. Đổi sang "rest" để quay lại cách cũ.
+      - key: V74_DATA_SOURCE
+        value: "auto"
+      # Nạp lịch sử 150 nến/cặp rất chậm (60 request/phút) để không tạo đợt burst
+      - key: WS_BACKFILL_RPM
+        value: "60"
+      # Quét rẻ (0 weight) nên quét dày hơn: 15 phút/lần cho app Android tươi dữ liệu
+      - key: V74_INTERVAL
+        value: "900"
       # 2 biến dưới đây KHÔNG điền ở đây — vào Render > Environment nhập tay
       - key: TELEGRAM_TOKEN
         sync: false

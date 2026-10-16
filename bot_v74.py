@@ -88,6 +88,62 @@ exchange = _build_exchange()
 scan_debug     = {}
 
 # ============================================================
+# [PATCH 2026-10-16d] NGUON DU LIEU WEBSOCKET — HET BI BAN IP
+#
+#  V74_DATA_SOURCE:
+#    "ws"   -> chi dung WS, khong bao gio goi REST de quet (cho feed san sang)
+#    "auto" -> WS neu dung duoc (mac dinh), chi quay ve REST khi WS hong han
+#    "rest" -> hanh vi cu (goi REST fetch_ohlcv tung cap)
+#  WebSocket KHONG ton request weight => khong the bi 418 "IP banned" vi quet.
+# ============================================================
+V74_DATA_SOURCE      = _os.environ.get("V74_DATA_SOURCE", "auto").strip().lower()
+NO_SIGNAL_NOTIFY_SEC = int(_os.environ.get("NO_SIGNAL_NOTIFY_SEC", "21600"))   # 6h
+ALERT_DEDUP_SEC      = int(_os.environ.get("ALERT_DEDUP_SEC", "43200"))        # 12h
+
+ws_feed = None
+if V74_DATA_SOURCE in ("auto", "ws"):
+    try:
+        from ws_feed import BinanceKlineFeed, WS_AVAILABLE as _WS_AVAILABLE
+        if not _WS_AVAILABLE:
+            print("[WS] Thieu thu vien websocket-client -> dung REST")
+        else:
+            ws_feed = BinanceKlineFeed(
+                interval="4h",
+                limit=150,
+                rest=exchange,
+                backfill_rpm=float(_os.environ.get("WS_BACKFILL_RPM", "60")),
+                min_candles=int(_os.environ.get("WS_MIN_CANDLES", "60")),
+                stale_sec=float(_os.environ.get("WS_STALE_SEC", "180")),
+            )
+            print(f"[WS] Da nap module ws_feed — nguon du lieu: {V74_DATA_SOURCE}")
+    except Exception as _e:
+        print(f"[WS] Khong nap duoc ws_feed: {_e} -> dung REST")
+
+# Tin hieu da ban / moc lan cuoi gui tin "khong co tin hieu"
+alerted_at          = {}
+last_no_signal_sent = 0.0
+
+
+def _ws_mode():
+    """True neu dang chay o che do WebSocket."""
+    return ws_feed is not None and V74_DATA_SOURCE in ("auto", "ws")
+
+
+def _use_rest_scan():
+    """Co duoc phep quet bang REST khong (che do rest, hoac WS hong han)."""
+    if not _ws_mode():
+        return True
+    return ws_feed.failed_hard()
+
+
+def _alert_allowed(symbol):
+    """Chong spam: khong gui lai cung 1 tin hieu trong ALERT_DEDUP_SEC."""
+    if time.time() - alerted_at.get(symbol, 0) < ALERT_DEDUP_SEC:
+        return False
+    alerted_at[symbol] = time.time()
+    return True
+
+# ============================================================
 # [PATCH 2026-10-16b] CHONG BAN BINANCE
 # Binance tra 418/-1003 kem moc "IP banned until <epoch_ms>". Truoc day bot van
 # goi lai moi vong -> vi pham lap -> Binance KEO DAI thoi gian ban.
@@ -160,6 +216,17 @@ def get_signals():
         # MỚI: Android dùng history để bù các lần miss
         "history":     scan_history
     })
+
+@flask_app.route('/ws')
+def get_ws():
+    """[PATCH 2026-10-16d] Suc khoe nguon du lieu WebSocket (khong ton request weight)."""
+    if ws_feed is None:
+        return jsonify({"enabled": False, "data_source": V74_DATA_SOURCE})
+    st = ws_feed.stats()
+    st.update({"enabled": True, "data_source": V74_DATA_SOURCE,
+               "usable": ws_feed.is_usable(), "failed_hard": ws_feed.failed_hard()})
+    return jsonify(st)
+
 
 @flask_app.route('/debug')
 def get_debug():
@@ -234,6 +301,7 @@ def save_v74_chart(symbol, df_raw):
 # ============================================================
 def run_v74_standard():
     global latest_signals, last_scan_time, scan_status, scan_history, scan_debug, BAN_UNTIL_MS
+    global last_no_signal_sent
 
     table = PrettyTable()
     table.field_names = ["Coin", "Up%", "Down%", "Peak", "Sqze", "Vol"]
@@ -247,29 +315,53 @@ def run_v74_standard():
         print(f"[BAN] {scan_status} — bo qua vong quet nay, khong goi Binance.")
         return
 
+    # [PATCH 2026-10-16d] Che do WS: chua nap du du lieu thi CHO, KHONG quet REST
+    # (quay ve REST luc nay chinh la thu lam ban bi keo dai).
+    if _ws_mode() and not _use_rest_scan():
+        if not ws_feed.is_usable():
+            scan_status = ws_feed.warmup_text()
+            scan_debug  = {"stage": "ws_warmup", "ws": ws_feed.stats()}
+            print(f"[WS] {scan_status} — bo qua vong quet nay (khong goi REST).")
+            return
+
     print(f"\n🚀 QUÉT KÈO V74: {scan_time_str}")
     scan_status = f"Đang quét... ({scan_time_str})"
 
     found_signals = []
-    dbg = {"start": scan_time_str, "pairs": 0, "scanned": 0, "errors": 0,
+    dbg = {"start": scan_time_str, "pairs": 0, "scanned": 0, "errors": 0, "skipped": 0,
            "err_samples": [], "stage": "start", "outer_error": ""}
     scan_debug = dbg
+    use_ws = _ws_mode() and not _use_rest_scan()
 
     try:
-        markets    = exchange.load_markets()
-        spot_pairs = [
-            s for s, m in markets.items()
-            if m['spot'] and m['quote'] == 'USDT' and m['active']
-        ]
+        if use_ws:
+            # [PATCH 2026-10-16d] Danh sach cap lay tu feed WS — khong goi REST
+            spot_pairs    = ws_feed.symbols()
+            dbg["source"] = "ws"
+            dbg["ws_ready"] = ws_feed.ready_count()
+        else:
+            markets    = exchange.load_markets()
+            spot_pairs = [
+                s for s, m in markets.items()
+                if m['spot'] and m['quote'] == 'USDT' and m['active']
+            ]
+            dbg["source"] = "rest"
 
         total = len(spot_pairs)
         dbg["pairs"] = total
         dbg["stage"] = "scanning"
-        print(f"📋 Tổng số cặp USDT: {total}")
+        print(f"📋 Tổng số cặp USDT: {total} (nguồn: {dbg['source']})")
 
         for idx, symbol in enumerate(spot_pairs, 1):
             try:
-                ohlcv   = exchange.fetch_ohlcv(symbol, '4h', limit=150)
+                if use_ws:
+                    # [PATCH 2026-10-16d] Lay nen tu bo dem WS, KHONG goi API
+                    ohlcv = ws_feed.get_ohlcv(symbol)
+                    if not ohlcv:
+                        dbg["skipped"] += 1
+                        continue
+                else:
+                    ohlcv = exchange.fetch_ohlcv(symbol, '4h', limit=150)
                 dbg["scanned"] += 1
                 df      = pd.DataFrame(ohlcv)
                 close_p = df[4].apply(pd.to_numeric)
@@ -380,8 +472,11 @@ def run_v74_standard():
         # ── Cập nhật biến toàn cục ───────────────────────────────
         latest_signals = signals_json
         last_scan_time = scan_time_str
-        scan_status    = f"Hoàn tất lúc {scan_time_str} — {len(found_signals)} tín hiệu"
+        scan_status    = (f"Hoàn tất lúc {scan_time_str} — {len(found_signals)} tín hiệu"
+                          f" ({dbg['source'].upper()}, {dbg['scanned']} cặp)")
         BAN_UNTIL_MS   = 0   # [PATCH 2026-10-16b] quet duoc tuc la da het ban
+        if _ws_mode():
+            dbg["ws"] = ws_feed.stats()
 
         # ── LƯU VÀO LỊCH SỬ (MỚI) ───────────────────────────────
         scan_history.insert(0, {
@@ -395,14 +490,21 @@ def run_v74_standard():
         print(f"📚 Lịch sử đang lưu: {len(scan_history)} lần quét")
 
         # ── GỬI TELEGRAM ────────────────────────────────────────
+        # [PATCH 2026-10-16d] Che do WS quet rat thuong xuyen (mac dinh 15 phut)
+        # nen phai chong spam: khong gui lai tin hieu cu, khong gui "0 tin hieu" lien tuc.
         if found_signals:
             print(table)
-            send_telegram_msg(
-                f"📊 *V74 REPORT — {scan_time_str}*\n"
-                f"Tìm thấy *{len(found_signals)}* tín hiệu\n"
-                f"```\n{table.get_string()}\n```"
-            )
-            for s in found_signals:
+            send_list = [s for s in found_signals if _alert_allowed(s['symbol'])]
+            if send_list:
+                send_telegram_msg(
+                    f"📊 *V74 REPORT — {scan_time_str}*\n"
+                    f"Tìm thấy *{len(found_signals)}* tín hiệu "
+                    f"({len(send_list)} mới)\n"
+                    f"```\n{table.get_string()}\n```"
+                )
+            else:
+                print("[TELEGRAM] Tin hieu da gui truoc do (trong ALERT_DEDUP_SEC) — khong gui lai.")
+            for s in send_list:
                 chart_path = save_v74_chart(s['symbol'], s['df'])
                 caption = (
                     f"🎯 *SIGNAL: {s['symbol']}*\n"
@@ -416,12 +518,14 @@ def run_v74_standard():
                 if os.path.exists(chart_path):
                     os.remove(chart_path)
         else:
-            msg = (
-                f"🔭 *V74 — {scan_time_str}*\n"
-                f"Không có mã nào thỏa mãn điều kiện Pump + Squeeze."
-            )
             print("🔭 Không có mã nào thỏa mãn sóng Pump và độ nén chuẩn.")
-            send_telegram_msg(msg)
+            # [PATCH 2026-10-16d] Chi bao "0 tin hieu" moi NO_SIGNAL_NOTIFY_SEC
+            if time.time() - last_no_signal_sent >= NO_SIGNAL_NOTIFY_SEC:
+                last_no_signal_sent = time.time()
+                send_telegram_msg(
+                    f"🔭 *V74 — {scan_time_str}*\n"
+                    f"Không có mã nào thỏa mãn điều kiện Pump + Squeeze."
+                )
 
     except Exception as e:
         try:

@@ -85,6 +85,23 @@ def _loop(name, fn, interval, first_delay=0):
         time.sleep(wait)
 
 
+def _start_ws_feed():
+    """[PATCH 2026-10-16d] Khoi dong nguon du lieu WebSocket ngay khi service lên.
+
+    Backfill chạy nền (~60 request/phút) nên phải bắt đầu TRƯỚC vòng quét đầu
+    tiên; nếu chưa xong, bot_v74 sẽ bỏ qua vòng đó chứ KHÔNG gọi REST.
+    """
+    feed = getattr(bot_v74, "ws_feed", None)
+    if feed is None:
+        print("[WS] Khong bat WebSocket (dang dung REST)")
+        return
+    try:
+        feed.start()
+        print(f"[WS] Da bat WebSocket — nguồn dữ liệu: {bot_v74.V74_DATA_SOURCE}")
+    except Exception as e:
+        print(f"[WS] Khong khoi dong duoc WS: {e}")
+
+
 # Endpoint để dịch vụ ping giữ service không ngủ (Render free ngủ sau 15' không có request)
 @bot_v74.flask_app.route("/")
 def _root():
@@ -103,9 +120,14 @@ if __name__ == "__main__":
     print(f"  Keepalive: http://0.0.0.0:{PORT}/health")
     print(f"  Chu kỳ V74: {V74_INTERVAL // 60} phút")
     print(f"  Sentinel:   {'BAT (gop chung)' if ENABLE_SENTINEL else 'TAT (chay tren GitHub Actions)'}")
+    print(f"  Du lieu:    {getattr(bot_v74, 'V74_DATA_SOURCE', 'rest').upper()} "
+          f"(WS = khong ton request weight)")
     print("=" * 60)
 
     threading.Thread(target=_self_ping, daemon=True, name="selfping").start()
+
+    # [PATCH 2026-10-16d] Bat WebSocket TRUOC vong quet dau tien
+    threading.Thread(target=_start_ws_feed, daemon=True, name="wsfeed").start()
 
     threading.Thread(
         target=_loop, args=("V74", bot_v74.run_v74_standard, V74_INTERVAL, 0),
