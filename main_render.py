@@ -23,7 +23,8 @@ ENABLE_SENTINEL = os.environ.get("ENABLE_SENTINEL", "0") == "1"
 if ENABLE_SENTINEL:
     import bot_sentinel
 
-V74_INTERVAL      = int(os.environ.get("V74_INTERVAL", 3600))       # giây
+# [PATCH 2026-10-16b] Mac dinh 2 gio/lan de giam request weight, tranh bi Binance ban IP
+V74_INTERVAL      = int(os.environ.get("V74_INTERVAL", 7200))       # giây
 SENTINEL_INTERVAL = int(os.environ.get("SENTINEL_INTERVAL", 3600))  # giây
 SENTINEL_DELAY    = int(os.environ.get("SENTINEL_DELAY", 300))      # lệch giờ so với V74
 PORT              = int(os.environ.get("PORT", 5000))

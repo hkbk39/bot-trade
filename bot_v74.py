@@ -66,6 +66,8 @@ SQUEEZE_THRESHOLD = 0.3
 VOL_EXHAUST_RATIO = 0.9
 
 FLASK_PORT   = int(_os.environ.get("PORT", 5000))   # Render tu cap PORT
+# [PATCH 2026-10-16b] Nhip quet khi chay bot_v74 truc tiep (mac dinh 2 gio/lan)
+SCAN_INTERVAL = int(_os.environ.get("V74_INTERVAL", 7200))
 MAX_HISTORY  = 24   # Lưu tối đa 24 lần quét gần nhất (~24h nếu quét mỗi 1h)
 
 # ============================================================
@@ -81,6 +83,62 @@ exchange = _build_exchange()
 
 # [PATCH 2026-10-16] Chan doan: dem so cap quet duoc / so loi de khong con "0 tin hieu" vo hinh
 scan_debug     = {}
+
+# ============================================================
+# [PATCH 2026-10-16b] CHONG BAN BINANCE
+# Binance tra 418/-1003 kem moc "IP banned until <epoch_ms>". Truoc day bot van
+# goi lai moi vong -> vi pham lap -> Binance KEO DAI thoi gian ban.
+# Gio: doc moc ban, nghi cho het ban roi moi quet lai.
+# ============================================================
+BAN_UNTIL_MS = 0     # epoch ms; > now = dang bi ban
+BAN_REASON   = ""
+
+
+def _extract_ban_until(text):
+    """Tim 'IP banned until <ms>' trong thong bao loi. Tra ve epoch ms hoac None."""
+    s = str(text)
+    key = "banned until "
+    i = s.find(key)
+    if i < 0:
+        return None
+    j = i + len(key)
+    digits = ""
+    while j < len(s) and s[j].isdigit():
+        digits += s[j]
+        j += 1
+    if not digits:
+        return None
+    try:
+        v = int(digits)
+    except Exception:
+        return None
+    if v < 10 ** 11:      # neu Binance tra ve giay thi doi sang ms
+        v *= 1000
+    return v
+
+
+def _note_ban(err_text):
+    """Ghi nho moc het ban. Tra ve True neu loi la ban IP."""
+    global BAN_UNTIL_MS, BAN_REASON
+    ms = _extract_ban_until(err_text)
+    if not ms:
+        return False
+    if ms > BAN_UNTIL_MS:
+        BAN_UNTIL_MS = ms
+    BAN_REASON = str(err_text)[:200]
+    return True
+
+
+def _ban_left_sec():
+    return max(0, int((BAN_UNTIL_MS - time.time() * 1000) / 1000))
+
+
+def _ban_status_text():
+    if _ban_left_sec() <= 0:
+        return "San sang quet"
+    end = datetime.fromtimestamp(BAN_UNTIL_MS / 1000).strftime('%H:%M:%S %d/%m/%Y')
+    return (f"Tam nghi — Binance ban IP toi {end} "
+            f"(con {_ban_left_sec() // 60} phut)")
 
 # ============================================================
 # FLASK API SERVER
@@ -172,13 +230,20 @@ def save_v74_chart(symbol, df_raw):
 # LOGIC QUÉT CHÍNH
 # ============================================================
 def run_v74_standard():
-    global latest_signals, last_scan_time, scan_status, scan_history
+    global latest_signals, last_scan_time, scan_status, scan_history, scan_debug, BAN_UNTIL_MS
 
     table = PrettyTable()
     table.field_names = ["Coin", "Up%", "Down%", "Peak", "Sqze", "Vol"]
     table.align = "l"
 
     scan_time_str = datetime.now().strftime('%H:%M:%S %d/%m/%Y')
+
+    # [PATCH 2026-10-16b] Dang trong thoi gian bi ban -> KHONG goi API, nghi tiep
+    if _ban_left_sec() > 0:
+        scan_status = _ban_status_text()
+        print(f"[BAN] {scan_status} — bo qua vong quet nay, khong goi Binance.")
+        return
+
     print(f"\n🚀 QUÉT KÈO V74: {scan_time_str}")
     scan_status = f"Đang quét... ({scan_time_str})"
 
@@ -275,7 +340,21 @@ def run_v74_standard():
                 _m = f"{type(_e).__name__}: {_e}"[:200]
                 if _m not in dbg["err_samples"] and len(dbg["err_samples"]) < 5:
                     dbg["err_samples"].append(_m)
+                # [PATCH 2026-10-16b] Bi ban IP -> dung quet ngay, khong goi tiep 495 cap
+                if _note_ban(_m):
+                    dbg["ban"] = True
+                    dbg["ban_until"] = BAN_UNTIL_MS
+                    dbg["stage"] = "banned"
+                    print("[BAN] Binance chan IP — dung vong quet nay, nghi cho het ban.")
+                    break
                 continue
+
+        # [PATCH 2026-10-16b] Dang bi ban -> KHONG ghi lich su "0 tin hieu" gay hieu nham
+        if dbg.get("ban"):
+            scan_debug  = dbg
+            scan_status = _ban_status_text()
+            print(f"[BAN] {scan_status}")
+            return
 
         # ── Tạo danh sách signal JSON cho lần quét này ──────────
         signals_json = [
@@ -298,6 +377,7 @@ def run_v74_standard():
         latest_signals = signals_json
         last_scan_time = scan_time_str
         scan_status    = f"Hoàn tất lúc {scan_time_str} — {len(found_signals)} tín hiệu"
+        BAN_UNTIL_MS   = 0   # [PATCH 2026-10-16b] quet duoc tuc la da het ban
 
         # ── LƯU VÀO LỊCH SỬ (MỚI) ───────────────────────────────
         scan_history.insert(0, {
@@ -346,7 +426,12 @@ def run_v74_standard():
             scan_debug = dbg
         except Exception:
             pass
-        scan_status = f"Lỗi: {e}"
+        # [PATCH 2026-10-16b] Neu loi la ban IP -> ghi moc va nghi cho het ban
+        if _note_ban(str(e)):
+            scan_status = _ban_status_text()
+            print(f"[BAN] {scan_status}")
+        else:
+            scan_status = f"Lỗi: {e}"
         print(f"[Lỗi quét] {e}")
 
 # ============================================================
@@ -384,6 +469,6 @@ if __name__ == "__main__":
     else:
         while True:
             run_v74_standard()
-            print(f"\nNghi 1 tieng, quet tiep sau "
+            print(f"\nNghi {SCAN_INTERVAL // 60} phut, quet tiep sau "
                   f"{datetime.now().strftime('%H:%M:%S')}...")
-            time.sleep(3600)
+            time.sleep(SCAN_INTERVAL)
