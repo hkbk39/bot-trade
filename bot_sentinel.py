@@ -73,6 +73,11 @@ CHAT_ID        = _env("TELEGRAM_CHAT_ID", required=True)
 LIMIT_SCAN    = 300        # Số coin spot quét mỗi lần
 MIN_VOL_24H   = 300_000    # Volume 24h tối thiểu (USDT)
 SCAN_INTERVAL = 3600       # Quét lại mỗi 60 phút (giây)
+# [PATCH 2026-10-17] 0.05s/coin (cu) ban dong thoi voi bot_v74 tren cung
+# IP Render -> Binance tra 418 hang loat, moi lan ban lai keo dai them.
+# Tang gian cach + dung het quet ngay khi bi ban (thay vi ban dua qua
+# het 300 coin con lai khong sleep, lam Binance keo dai ban them).
+SENTINEL_SLEEP_SEC = float(_os.environ.get("SENTINEL_SLEEP_SEC", "10"))
 
 # ─── BTC BENCHMARK ───────────────────────────────────────────
 BTC_LOOKBACK_DAYS = 14
@@ -797,6 +802,7 @@ def run_sentinel():
         skip_stats[reason] = skip_stats.get(reason, 0) + 1
 
     for symbol in spot_pairs:
+        banned = False
         try:
             raw1 = exchange.fetch_ohlcv(symbol, '1d', limit=max(90, BTC_LOOKBACK_DAYS) + 5)
             if len(raw1) < BTC_LOOKBACK_DAYS + 2:
@@ -863,10 +869,19 @@ def run_sentinel():
                 'rr': rr, 'score': score,
             })
 
-            time.sleep(0.05)
+        except Exception as e:
+            msg = str(e)
+            if '418' in msg or '429' in msg or 'banned' in msg.lower():
+                print(f"  [SENTINEL] Bi Binance chan ({msg[:150]}) "
+                      f"- dung quet vong nay, thu lai sau {SCAN_INTERVAL // 60} phut.")
+                banned = True
+            # khong sleep o day: finally ben duoi lo het
 
-        except Exception:
-            continue
+        finally:
+            time.sleep(SENTINEL_SLEEP_SEC)
+
+        if banned:
+            break
 
     lazy_coins.sort(key=lambda x: x['score'], reverse=True)
 
