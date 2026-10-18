@@ -79,22 +79,27 @@ def _seconds_until_next_v74_mark(now=None):
     return max(1.0, (nxt - now).total_seconds()), nxt
 
 
-def _loop_v74(fn):
+def _loop_v74(fns):
     """[PATCH 2026-10-18] Vong quet V74 chay DUNG cac moc gio co dinh (mac dinh
     7h01/11h01/15h01/19h01/23h01/3h01) thay vi nghi 1 khoang thoi gian co dinh
     tu luc service khoi dong - khop voi nhip nen H4 dong va voi lich gui tin
-    Telegram cua scan_v74_live.py (cron agent coin)."""
+    Telegram cua scan_v74_live.py (cron agent coin).
+
+    [PATCH 2026-10-18 them N7] fns la 1 list ham quet, chay LAN LUOT tai CUNG
+    1 moc gio (V74 roi N7) de 2 keo luon dong bo lich, khong tao vong lap/lich
+    rieng cho N7."""
     while True:
         wait, nxt = _seconds_until_next_v74_mark()
         print(f"[V74] ⏸ chờ tới mốc {nxt:%H:%M:%S %d/%m} ({wait / 60:.1f} phút)")
         time.sleep(wait)
         started = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
         print(f"\n[V74] ▶ bắt đầu quét lúc {started}")
-        try:
-            fn()
-        except Exception as e:
-            print(f"[V74] ✖ LỖI: {e}")
-            traceback.print_exc()
+        for fn in fns:
+            try:
+                fn()
+            except Exception as e:
+                print(f"[V74] ✖ LỖI ({fn.__name__}): {e}")
+                traceback.print_exc()
 
 
 def _loop(name, fn, interval, first_delay=0):
@@ -169,7 +174,7 @@ if __name__ == "__main__":
     threading.Thread(target=_start_ws_feed, daemon=True, name="wsfeed").start()
 
     threading.Thread(
-        target=_loop_v74, args=(bot_v74.run_v74_standard,),
+        target=_loop_v74, args=([bot_v74.run_v74_standard, bot_v74.run_n7_standard],),
         daemon=True, name="v74",
     ).start()
 

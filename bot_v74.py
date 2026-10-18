@@ -8,9 +8,13 @@ matplotlib.use("Agg")   # chay khong can man hinh (CI/server)
 import mplfinance as mpf
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify
 from datetime import datetime
 from prettytable import PrettyTable
+
+import bb as n7_bb
+import combo as n7_combo
 
 # ============================================================
 # CẤU HÌNH BIẾN
@@ -265,6 +269,321 @@ def get_delisting_blocklist():
     return _delist_blocklist
 
 # ============================================================
+# [PATCH 2026-10-18] N7 — quet song song V74, dung CHUNG lich/vong lap
+# (main_render.py goi run_n7_standard() ngay sau run_v74_standard() tai
+# moi moc H4). Logic PORT 1:1 tu projects/coin-spot-n7-allin/bot.py +
+# combo.py + bb.py (vendor nguyen file ben canh bot_v74.py). Day CHI la
+# man hinh hien thi tin hieu cho app Android (bot live tren VPS dang tam
+# dung) - KHONG dat lenh, khong broker, khong state_dir/khoa file.
+#
+#   ENTRY: combo 3of3/4of4/4of5 tren nen NGAY -> doi dip dau tien (H1
+#          Close < BB giua) sau signal_close_ms -> can DUNG 7 nen H1 lien
+#          tiep Close < BB giua, than nen TB <=5% -> READY (gia vao du
+#          kien = Close nen thu 7).
+#   Hien thi CA tin hieu dang WAITING_DIP (moi phat hien, cho dip) VA
+#   READY (sap/du dieu kien vao) de app thay duoc tien trien, khac V74
+#   (V74 chi hien tin hieu dat day du dieu kien pump+squeeze ngay luc quet).
+# ============================================================
+DAY_MS_N7  = 86_400_000
+HOUR_MS_N7 = 3_600_000
+N7_WARMUP_HOURS        = 25     # >= BB period (20) de band dung tu dau chuoi
+N7_BB_PERIOD           = 20
+N7_BB_SIGMA            = 2.0
+N7_BB_DDOF             = 0
+N7_N_CANDLES           = 7
+N7_MAX_AVG_BODY_PCT    = 5.0
+N7_MAX_DIP_SEARCH_DAYS = 45
+N7_ENTRY_MAX_DELAY_MIN = 180
+N7_STRONG_GREEN_PCT    = 4.0
+N7_DAILY_FETCH_LIMIT   = 10     # du cho combo window toi da 5 ngay
+N7_UNIVERSE_TOP        = 300
+# Mirror config.json cua coin-spot-n7-allin (universe.risky_coins)
+N7_RISKY_COINS = {
+    "ALLOUSDT", "ERAUSDT", "HEIUSDT", "AUCTIONUSDT", "CVXUSDT", "LINEAUSDT",
+    "BANANAUSDT", "TIAUSDT", "IDUSDT", "CFXUSDT", "DOGSUSDT", "PORTALUSDT",
+    "MEMEUSDT", "WOOUSDT", "HOMEUSDT", "JTOUSDT", "ENAUSDT",
+}
+# Mirror config.json cua coin-spot-n7-allin (buy_leg.combos, DUNG thu tu uu tien)
+N7_COMBOS_ORDER = [
+    {"combo": "4of5", "need": 4, "window_days": 5},
+    {"combo": "3of3", "need": 3, "window_days": 3},
+    {"combo": "4of4", "need": 4, "window_days": 4},
+]
+
+scan_history_n7   = []
+latest_signals_n7 = []
+last_scan_time_n7 = ""
+scan_status_n7    = "Chưa quét"
+scan_debug_n7     = {}
+
+# Theo doi tin hieu qua cac vong quet (trong RAM - mat khi service restart,
+# giong tinh chat cua scan_history/latest_signals ben V74).
+n7_pending = {}            # key "SYMBOL|signal_open_ms" -> dict
+n7_seen_signal_keys = set()
+
+_N7_REST_BASES = ("https://api.binance.com", "https://api1.binance.com", "https://api4.binance.com")
+
+
+def _n7_get_json(path, params=None):
+    bases = _N7_REST_BASES
+    if _os.environ.get("BINANCE_DATA_MIRROR", "0") == "1":
+        bases = ("https://data-api.binance.vision",) + _N7_REST_BASES
+    last = None
+    for base in bases:
+        try:
+            r = requests.get(base + path, params=params, timeout=15)
+            r.raise_for_status()
+            return r.json()
+        except Exception as exc:
+            last = exc
+    raise RuntimeError(f"N7 Binance REST loi {path}: {last}")
+
+
+def _n7_symbol_display(sym):
+    """'BTCUSDT' -> 'BTC/USDT' (dung format giong ccxt de app tai dung fetchCandles)."""
+    return f"{sym[:-4]}/USDT" if sym.endswith("USDT") else sym
+
+
+def _n7_universe():
+    tickers = _n7_get_json("/api/v3/ticker/24hr")
+    qv = {x["symbol"]: float(x.get("quoteVolume", 0) or 0) for x in tickers}
+    exchange_info = _n7_get_json("/api/v3/exchangeInfo")
+    rows = []
+    for x in exchange_info.get("symbols", []):
+        sym, base = x.get("symbol", ""), x.get("baseAsset", "")
+        if x.get("quoteAsset") != "USDT" or x.get("status") != "TRADING":
+            continue
+        if not x.get("isSpotTradingAllowed") or n7_combo.excluded_base(base) or sym in N7_RISKY_COINS:
+            continue
+        rows.append((sym, qv.get(sym, 0.0)))
+    rows.sort(key=lambda r: -r[1])
+    return [sym for sym, _ in rows[:N7_UNIVERSE_TOP]]
+
+
+def _n7_daily(symbol, now_ms):
+    rows = _n7_get_json("/api/v3/klines", {"symbol": symbol, "interval": "1d", "limit": N7_DAILY_FETCH_LIMIT})
+    return [c for c in rows if int(c[0]) + DAY_MS_N7 <= now_ms]
+
+
+def _n7_hourly(symbol, start_ms, now_ms):
+    rows = _n7_get_json("/api/v3/klines", {"symbol": symbol, "interval": "1h",
+                                            "startTime": int(start_ms), "limit": 1000})
+    rows = [c for c in rows if int(c[0]) + HOUR_MS_N7 <= now_ms]
+    return sorted(rows, key=lambda c: int(c[0]))
+
+
+def _n7_ticker_price(symbol):
+    r = _n7_get_json("/api/v3/ticker/price", {"symbol": symbol})
+    return float(r.get("price"))
+
+
+# Vendored 1:1 tu projects/coin-spot-n7-allin/bot.py::find_dip/check_contraction_n7
+def n7_find_dip(candles, band_list, signal_close_ms):
+    for i, c in enumerate(candles):
+        if int(c[0]) < signal_close_ms:
+            continue
+        band = band_list[i]
+        if band is None:
+            continue
+        if n7_bb.candle_close(c) < band[1]:
+            return i
+    return None
+
+
+def n7_check_contraction(candles, band_list, dip_idx, n_candles, max_avg_body_pct):
+    n = len(candles)
+    if dip_idx + n_candles > n:
+        return {"status": "INSUFFICIENT_DATA"}
+    body_pcts = []
+    for k in range(n_candles):
+        idx = dip_idx + k
+        band = band_list[idx]
+        if band is None:
+            return {"status": "INSUFFICIENT_DATA"}
+        c = candles[idx]
+        close_px = n7_bb.candle_close(c)
+        if close_px >= band[1]:
+            return {"status": "CROSSED_ABOVE_BEFORE_N"}
+        open_px = n7_bb.candle_open(c)
+        body_pcts.append(abs(close_px - open_px) / open_px * 100.0)
+    avg_body_pct = sum(body_pcts) / len(body_pcts)
+    last_idx = dip_idx + n_candles - 1
+    last_candle = candles[last_idx]
+    if avg_body_pct > max_avg_body_pct:
+        return {"status": "BODY_TOO_WIDE", "avg_body_pct": avg_body_pct}
+    return {
+        "status": "READY",
+        "avg_body_pct": avg_body_pct,
+        "contraction_end_open_ms": int(last_candle[0]),
+        "contraction_end_ms": int(last_candle[0]) + HOUR_MS_N7,
+        "contraction_end_price": n7_bb.candle_close(last_candle),
+        "contraction_end_quote_volume": n7_bb.candle_quote_volume(last_candle),
+    }
+
+
+def run_n7_standard():
+    """Quet tin hieu N7 (combo + dip/contraction BB H1) - chi hien thi, khong vao lenh."""
+    global latest_signals_n7, last_scan_time_n7, scan_status_n7, scan_history_n7, scan_debug_n7
+    global n7_pending, n7_seen_signal_keys, BAN_UNTIL_MS
+
+    scan_time_str = datetime.now().strftime('%H:%M:%S %d/%m/%Y')
+
+    # Dung CHUNG co che chong ban IP voi V74 (cung 1 IP Render goi Binance)
+    if _ban_left_sec() > 0:
+        scan_status_n7 = _ban_status_text()
+        print(f"[N7][BAN] {scan_status_n7} — bo qua vong quet N7.")
+        return
+
+    print(f"\n📈 QUÉT KÈO N7: {scan_time_str}")
+    scan_status_n7 = f"Đang quét... ({scan_time_str})"
+    dbg = {"start": scan_time_str, "pairs": 0, "scanned": 0, "errors": 0,
+           "err_samples": [], "stage": "start"}
+    scan_debug_n7 = dbg
+    now_ms = int(time.time() * 1000)
+
+    try:
+        symbols = _n7_universe()
+        dbg["pairs"] = len(symbols)
+        dbg["stage"] = "scan_new_signals"
+
+        # 1) quet tin hieu combo MOI tren nen ngay (toan universe)
+        def work(sym):
+            rows = _n7_daily(sym, now_ms)
+            if not rows:
+                return None
+            sig = n7_combo.buy_signals_for_symbol(rows, now_ms, N7_COMBOS_ORDER, N7_STRONG_GREEN_PCT)
+            if sig:
+                sig["symbol"] = sym
+            return sig
+
+        found = []
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            jobs = {pool.submit(work, s): s for s in symbols}
+            for job in as_completed(jobs):
+                dbg["scanned"] += 1
+                try:
+                    sig = job.result()
+                    if sig:
+                        found.append(sig)
+                except Exception as exc:
+                    dbg["errors"] += 1
+                    _m = f"{type(exc).__name__}: {exc}"[:200]
+                    if _m not in dbg["err_samples"] and len(dbg["err_samples"]) < 5:
+                        dbg["err_samples"].append(_m)
+                    if _note_ban(_m):
+                        dbg["ban"] = True
+                        dbg["stage"] = "banned"
+
+        if dbg.get("ban"):
+            scan_debug_n7 = dbg
+            scan_status_n7 = _ban_status_text()
+            print(f"[N7][BAN] {scan_status_n7}")
+            return
+
+        new_count = 0
+        for sig in found:
+            key = f"{sig['symbol']}|{sig['signal_open_ms']}"
+            if key in n7_seen_signal_keys:
+                continue
+            n7_seen_signal_keys.add(key)
+            new_count += 1
+            n7_pending[key] = {
+                "symbol": sig["symbol"], "combo": sig["combo"], "signal_date": sig["signal_date"],
+                "signal_open_ms": sig["signal_open_ms"], "signal_close_ms": sig["signal_close_ms"],
+                "daily_return_pct": sig["daily_return_pct"], "status": "WAITING_DIP",
+                "dip_search_deadline_ms": sig["signal_close_ms"] + int(N7_MAX_DIP_SEARCH_DAYS * DAY_MS_N7),
+            }
+            print(f"[N7] TIN HIEU MOI {sig['symbol']} combo={sig['combo']} ngay={sig['signal_date']}")
+
+        # 2) tien trien cac tin hieu dang theo doi (dip/contraction tren H1)
+        dbg["stage"] = "advance_pending"
+        dead_keys = []
+        for key, p in list(n7_pending.items()):
+            if p["status"] == "READY":
+                continue
+            if now_ms > p["dip_search_deadline_ms"]:
+                dead_keys.append(key)
+                continue
+            start_ms = p["signal_close_ms"] - N7_WARMUP_HOURS * HOUR_MS_N7
+            try:
+                candles = _n7_hourly(p["symbol"], start_ms, now_ms)
+            except Exception:
+                dbg["errors"] += 1
+                continue
+            if not candles:
+                continue
+            band_list = n7_bb.bands_for(candles, N7_BB_PERIOD, N7_BB_SIGMA, N7_BB_DDOF)
+            dip_idx = n7_find_dip(candles, band_list, p["signal_close_ms"])
+            if dip_idx is None:
+                continue
+            cont = n7_check_contraction(candles, band_list, dip_idx, N7_N_CANDLES, N7_MAX_AVG_BODY_PCT)
+            status = cont["status"]
+            if status == "INSUFFICIENT_DATA":
+                continue
+            if status in ("CROSSED_ABOVE_BEFORE_N", "BODY_TOO_WIDE"):
+                dead_keys.append(key)
+                continue
+            p.update({
+                "status": "READY", "avg_body_pct": cont["avg_body_pct"],
+                "contraction_end_ms": cont["contraction_end_ms"],
+                "contraction_end_price": cont["contraction_end_price"],
+                "contraction_end_quote_volume": cont["contraction_end_quote_volume"],
+            })
+            print(f"[N7] SAN SANG {p['symbol']} ({p['combo']}) gia~{cont['contraction_end_price']:.6g}")
+
+        for k in dead_keys:
+            n7_pending.pop(k, None)
+
+        # Tin hieu READY qua cu (giong entry_guard.max_delay_minutes) -> bo
+        max_delay_ms = N7_ENTRY_MAX_DELAY_MIN * 60_000
+        for key, p in list(n7_pending.items()):
+            if p["status"] == "READY" and now_ms - int(p["contraction_end_ms"]) > max_delay_ms:
+                n7_pending.pop(key, None)
+
+        # 3) build JSON cho app - hien CA WAITING_DIP (tin hieu moi, cho dip)
+        #    VA READY (du dieu kien, sap vao) de thay tien trien theo thoi gian
+        signals_json = []
+        for key, p in list(n7_pending.items()):
+            try:
+                price = _n7_ticker_price(p["symbol"])
+            except Exception:
+                price = float(p.get("contraction_end_price", 0.0))
+            signals_json.append({
+                "symbol":           _n7_symbol_display(p["symbol"]),
+                "price":            round(float(price), 8),
+                "combo":            p["combo"],
+                "signal_date":      p["signal_date"],
+                "status":           p["status"],
+                "daily_return_pct": round(float(p.get("daily_return_pct", 0.0)), 2),
+                "avg_body_pct":     round(float(p.get("avg_body_pct", 0.0)), 2),
+                "target_price":     round(float(p.get("contraction_end_price", price)), 8),
+                "time":             datetime.now().strftime('%H:%M:%S'),
+            })
+
+        latest_signals_n7 = signals_json
+        last_scan_time_n7 = scan_time_str
+        scan_status_n7    = (f"Hoàn tất lúc {scan_time_str} — {len(signals_json)} tín hiệu theo dõi "
+                             f"({new_count} mới, {dbg['scanned']} cặp quét)")
+        BAN_UNTIL_MS       = 0
+        scan_debug_n7      = dbg
+
+        scan_history_n7.insert(0, {"scan_time": scan_time_str, "signals": signals_json})
+        if len(scan_history_n7) > MAX_HISTORY:
+            scan_history_n7.pop()
+        print(f"[N7] KET THUC: {new_count} tin hieu moi | {len(n7_pending)} dang theo doi")
+
+    except Exception as e:
+        dbg["stage"] = "outer_error"
+        dbg["outer_error"] = f"{type(e).__name__}: {e}"[:300]
+        scan_debug_n7 = dbg
+        if _note_ban(str(e)):
+            scan_status_n7 = _ban_status_text()
+        else:
+            scan_status_n7 = f"Lỗi: {e}"
+        print(f"[N7][Lỗi quét] {e}")
+
+
+# ============================================================
 # FLASK API SERVER
 # ============================================================
 flask_app = Flask(__name__)
@@ -280,6 +599,18 @@ def get_signals():
         "debug":       scan_debug,          # [PATCH 2026-10-16] so cap quet / so loi
         # MỚI: Android dùng history để bù các lần miss
         "history":     scan_history
+    })
+
+@flask_app.route('/signals_n7')
+def get_signals_n7():
+    """[PATCH 2026-10-18] Tuong tu /signals nhung cho keo N7 (quet song song V74)."""
+    return jsonify({
+        "signals":     latest_signals_n7,
+        "last_scan":   last_scan_time_n7,
+        "status":      scan_status_n7,
+        "total_found": len(latest_signals_n7),
+        "debug":       scan_debug_n7,
+        "history":     scan_history_n7
     })
 
 @flask_app.route('/ws')
