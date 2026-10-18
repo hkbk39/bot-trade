@@ -11,7 +11,7 @@ import os
 import time
 import threading
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Hai module bot không tự khởi động gì khi được import
 # (mọi thứ đều nằm trong khối `if __name__ == "__main__"`).
@@ -23,8 +23,13 @@ ENABLE_SENTINEL = os.environ.get("ENABLE_SENTINEL", "0") == "1"
 if ENABLE_SENTINEL:
     import bot_sentinel
 
-# [PATCH 2026-10-16b] Mac dinh 2 gio/lan de giam request weight, tranh bi Binance ban IP
-V74_INTERVAL      = int(os.environ.get("V74_INTERVAL", 7200))       # giây
+# [PATCH 2026-10-18] Theo yeu cau user: quet/gui du lieu DUNG 4 tieng 1 lan, khop
+# moc nen H4 dong (00/04/08/12/16/20h UTC = 07/11/15/19/23/03h VN +1 phut de chac
+# chan nen moi da dong). Khong con dung V74_INTERVAL (nghi co dinh) cho vong V74
+# nua - gia tri nay chi con y nghia lich su, khong anh huong lich quet.
+V74_SCHEDULE_HOURS  = [int(x) for x in os.environ.get("V74_SCHEDULE_HOURS", "3,7,11,15,19,23").split(",")]
+V74_SCHEDULE_MINUTE = int(os.environ.get("V74_SCHEDULE_MINUTE", "1"))
+V74_INTERVAL      = int(os.environ.get("V74_INTERVAL", 7200))       # giây (khong con dung cho vong V74)
 SENTINEL_INTERVAL = int(os.environ.get("SENTINEL_INTERVAL", 3600))  # giây
 SENTINEL_DELAY    = int(os.environ.get("SENTINEL_DELAY", 300))      # lệch giờ so với V74
 PORT              = int(os.environ.get("PORT", 5000))
@@ -56,6 +61,40 @@ def _self_ping():
         except Exception as e:
             print(f"[PING] lỗi: {e}")
         time.sleep(interval)
+
+
+def _seconds_until_next_v74_mark(now=None):
+    """[PATCH 2026-10-18] Giay con lai toi moc HH:MINUTE ke tiep trong
+    V74_SCHEDULE_HOURS (gio dia phuong - Render dat TZ=Asia/Ho_Chi_Minh).
+    """
+    now = now or datetime.now()
+    candidates = []
+    for day_offset in (0, 1):
+        day = now + timedelta(days=day_offset)
+        for h in V74_SCHEDULE_HOURS:
+            cand = day.replace(hour=h, minute=V74_SCHEDULE_MINUTE, second=0, microsecond=0)
+            if cand > now:
+                candidates.append(cand)
+    nxt = min(candidates)
+    return max(1.0, (nxt - now).total_seconds()), nxt
+
+
+def _loop_v74(fn):
+    """[PATCH 2026-10-18] Vong quet V74 chay DUNG cac moc gio co dinh (mac dinh
+    7h01/11h01/15h01/19h01/23h01/3h01) thay vi nghi 1 khoang thoi gian co dinh
+    tu luc service khoi dong - khop voi nhip nen H4 dong va voi lich gui tin
+    Telegram cua scan_v74_live.py (cron agent coin)."""
+    while True:
+        wait, nxt = _seconds_until_next_v74_mark()
+        print(f"[V74] ⏸ chờ tới mốc {nxt:%H:%M:%S %d/%m} ({wait / 60:.1f} phút)")
+        time.sleep(wait)
+        started = datetime.now().strftime("%H:%M:%S %d/%m/%Y")
+        print(f"\n[V74] ▶ bắt đầu quét lúc {started}")
+        try:
+            fn()
+        except Exception as e:
+            print(f"[V74] ✖ LỖI: {e}")
+            traceback.print_exc()
 
 
 def _loop(name, fn, interval, first_delay=0):
@@ -118,7 +157,7 @@ if __name__ == "__main__":
     print("  RUNNER — V74 + Flask API")
     print(f"  API:       http://0.0.0.0:{PORT}/signals")
     print(f"  Keepalive: http://0.0.0.0:{PORT}/health")
-    print(f"  Chu kỳ V74: {V74_INTERVAL // 60} phút")
+    print(f"  Chu kỳ V74: đúng mốc {V74_SCHEDULE_HOURS}h:{V74_SCHEDULE_MINUTE:02d} (giờ VN)")
     print(f"  Sentinel:   {'BAT (gop chung)' if ENABLE_SENTINEL else 'TAT (chay tren GitHub Actions)'}")
     print(f"  Du lieu:    {getattr(bot_v74, 'V74_DATA_SOURCE', 'rest').upper()} "
           f"(WS = khong ton request weight)")
@@ -130,7 +169,7 @@ if __name__ == "__main__":
     threading.Thread(target=_start_ws_feed, daemon=True, name="wsfeed").start()
 
     threading.Thread(
-        target=_loop, args=("V74", bot_v74.run_v74_standard, V74_INTERVAL, 0),
+        target=_loop_v74, args=(bot_v74.run_v74_standard,),
         daemon=True, name="v74",
     ).start()
 

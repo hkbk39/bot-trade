@@ -1,6 +1,7 @@
 import ccxt
 import pandas as pd
 import requests
+import re
 import time
 import matplotlib
 matplotlib.use("Agg")   # chay khong can man hinh (CI/server)
@@ -59,13 +60,17 @@ TOKEN   = _env("TELEGRAM_TOKEN", required=True)
 CHAT_ID = _env("TELEGRAM_CHAT_ID", required=True)
 
 SCAN_DAYS        = 16
-MIN_GROWTH_PCT   = 40
-# [PATCH 2026-10-16c] Chi show dinh trong 5 ngay tro lai; dinh cu hon => bo qua
-# (coin nen lau ngay da chuyen downtrend, mau thuan voi bot sell)
-MAX_DAYS_FROM_PEAK = float(_os.environ.get("MAX_DAYS_FROM_PEAK", "5"))
+H4_MS            = 4 * 3600 * 1000
+# [PATCH 2026-10-18] Dong bo CHINH XAC voi tham so BEST dang chay LIVE tien thuc
+# tren VPS (projects/coin-spot-v74-2slot/v74core.py, chot backtest 2026-10-17
+# 21:59: MIN_GROWTH=0.35, MAX_DAYS_PEAK=9.0, SQZ_MAX=0.25). Truoc ban vay la
+# 40%/5 ngay/0,30 - lech voi dieu kien bot dang vao lenh that, khien app hien
+# tin hieu khac voi bot VPS. Theo yeu cau user 2026-10-18.
+MIN_GROWTH_PCT   = 35
+MAX_DAYS_FROM_PEAK = float(_os.environ.get("MAX_DAYS_FROM_PEAK", "9"))
 MIN_DAYS_FROM_PEAK = float(_os.environ.get("MIN_DAYS_FROM_PEAK", "1.5"))
 MIN_PULLBACK_PCT = 30
-SQUEEZE_THRESHOLD = 0.3
+SQUEEZE_THRESHOLD = 0.25
 VOL_EXHAUST_RATIO = 0.9
 
 FLASK_PORT   = int(_os.environ.get("PORT", 5000))   # Render tu cap PORT
@@ -198,6 +203,66 @@ def _ban_status_text():
     end = datetime.fromtimestamp(BAN_UNTIL_MS / 1000).strftime('%H:%M:%S %d/%m/%Y')
     return (f"Tam nghi — Binance ban IP toi {end} "
             f"(con {_ban_left_sec() // 60} phut)")
+
+# ============================================================
+# [PATCH 2026-10-17] LOC COIN CO THONG BAO DELISTING
+# Binance thuong cong bo delist truoc ~10 ngay (catalogId=161 "Delisting").
+# Loai cac coin nay khoi universe TRUOC khi quet tin hieu, vi lenh V74 co the
+# giu toi 120h (5 ngay) va khong co stoploss cung -> dinh delist giua luc giu
+# lenh se rat nguy hiem (mat thanh khoan / bi force-sell).
+# ============================================================
+DELIST_CACHE_TTL_SEC = 6 * 3600   # lam moi toi da 6h/lan, khong spam API CMS
+DELIST_LOOKBACK_DAYS = 30         # chi tinh thong bao cong bo trong 30 ngay gan nhat
+_delist_blocklist     = set()
+_delist_blocklist_ts  = 0.0
+
+# Chi doc ticker tu TIEU DE dang "Binance Will Delist X, Y on 2026-10-28"
+# (da kiem chung day la dang chuan cho cac thong bao neu dich danh ten coin).
+# KHONG fetch trang chi tiet: trang nay bi AWS WAF chan (tra 202 "challenge",
+# 0 byte) khi goi tu server -> da thu va xac nhan khong doc duoc, bo qua de
+# tranh goi API vo ich/bi nghi la bot. Thong bao dang batch khong neu ten coin
+# trong title (vd "Notice of Removal of Spot Trading Pairs - <ngay>") se
+# KHONG duoc loc tu dong — chi la fallback thieu, khong lam fail ca he thong.
+def _extract_tickers_from_title(title):
+    """Vd: 'Binance Will Delist EPIC, QUICK on 2026-10-28' -> {'EPIC','QUICK'}."""
+    m = re.search(r"[Dd]elist\s+([A-Z0-9]+(?:\s*,\s*[A-Z0-9]+)*)\s+on\b", title or "")
+    if not m:
+        return set()
+    return {t.strip() for t in m.group(1).split(",") if t.strip()}
+
+
+def get_delisting_blocklist():
+    """Tra ve set ticker (BASE, vd 'USDP') dang co thong bao delist con hieu luc
+    trong {DELIST_LOOKBACK_DAYS} ngay gan nhat. Fail-open: loi mang/API thi tra
+    ve cache cu (hoac rong) — KHONG lam fail vong quet chinh."""
+    global _delist_blocklist, _delist_blocklist_ts
+    now = time.time()
+    if _delist_blocklist_ts and (now - _delist_blocklist_ts) < DELIST_CACHE_TTL_SEC:
+        return _delist_blocklist
+
+    try:
+        resp = requests.get(
+            "https://www.binance.com/bapi/apex/v1/public/apex/cms/article/list/query",
+            params={"type": 1, "pageNo": 1, "pageSize": 20, "catalogId": 161},
+            timeout=8,
+        )
+        articles = resp.json()["data"]["catalogs"][0]["articles"]
+        cutoff_ms = (now - DELIST_LOOKBACK_DAYS * 86400) * 1000
+
+        new_blocklist = set()
+        for art in articles:
+            if art.get("releaseDate", 0) < cutoff_ms:
+                continue
+            new_blocklist |= _extract_tickers_from_title(art.get("title", ""))
+
+        _delist_blocklist = new_blocklist
+        _delist_blocklist_ts = now
+        if new_blocklist:
+            print(f"[DELIST] Blocklist moi ({len(new_blocklist)} coin): {sorted(new_blocklist)}")
+    except Exception as e:
+        print(f"[DELIST] Loi lam moi blocklist, dung cache cu ({len(_delist_blocklist)} coin): {e}")
+
+    return _delist_blocklist
 
 # ============================================================
 # FLASK API SERVER
@@ -347,6 +412,17 @@ def run_v74_standard():
             ]
             dbg["source"] = "rest"
 
+        # [PATCH 2026-10-17] Loai coin co thong bao delisting truoc khi quet
+        delist_blocklist = get_delisting_blocklist()
+        delist_removed = sorted({
+            s.split('/')[0] for s in spot_pairs
+            if s.split('/')[0] in delist_blocklist
+        })
+        if delist_removed:
+            spot_pairs = [s for s in spot_pairs if s.split('/')[0] not in delist_blocklist]
+            print(f"🚫 Bỏ qua {len(delist_removed)} coin có thông báo delisting: {delist_removed}")
+        dbg["delist_blocked"] = delist_removed
+
         total = len(spot_pairs)
         dbg["pairs"] = total
         dbg["stage"] = "scanning"
@@ -362,6 +438,16 @@ def run_v74_standard():
                         continue
                 else:
                     ohlcv = exchange.fetch_ohlcv(symbol, '4h', limit=150)
+
+                # [PATCH 2026-10-18] Chi dung nen DA DONG - giong dung bot VPS
+                # (projects/coin-spot-v74-2slot/bot.py::_final_candles). Nen cuoi
+                # cung tu WS/REST co the con dang chay (chua dong), neu dung se
+                # ra tin hieu/gia khac voi bot live va "nhay" moi lan quet.
+                now_ms = time.time() * 1000
+                ohlcv = [c for c in ohlcv if float(c[0]) + H4_MS <= now_ms]
+                if len(ohlcv) < 96:
+                    dbg["skipped"] += 1
+                    continue
                 dbg["scanned"] += 1
                 df      = pd.DataFrame(ohlcv)
                 close_p = df[4].apply(pd.to_numeric)
