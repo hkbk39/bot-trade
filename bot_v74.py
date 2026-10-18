@@ -9,7 +9,7 @@ import mplfinance as mpf
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from datetime import datetime
 from prettytable import PrettyTable
 
@@ -62,6 +62,9 @@ def _build_exchange(default_type="spot"):
 
 TOKEN   = _env("TELEGRAM_TOKEN", required=True)
 CHAT_ID = _env("TELEGRAM_CHAT_ID", required=True)
+# [PATCH 2026-10-19] Token xac thuc cho /ingest/v74 - cho phep may local (IP
+# chua bi Binance ban) day du lieu quet vao khi Render dang bi ban IP.
+INGEST_TOKEN = _env("INGEST_TOKEN", default="")
 
 SCAN_DAYS        = 16
 H4_MS            = 4 * 3600 * 1000
@@ -600,6 +603,31 @@ def get_signals():
         # MỚI: Android dùng history để bù các lần miss
         "history":     scan_history
     })
+
+@flask_app.route('/ingest/v74', methods=['POST'])
+def ingest_v74():
+    """[PATCH 2026-10-19] Nhan ket qua quet tu may local khi Render dang bi
+    Binance ban IP (khong backfill/quet REST duoc). Dung CHUNG schema voi
+    /signals (symbol dang "BASE/USDT", price/growth/pullback/tp/sl/squeeze/
+    vol_ratio/days_peak/time) nen app Android khong can sua gi.
+    Bao ve bang header X-Ingest-Token phai khop bien moi truong INGEST_TOKEN."""
+    global latest_signals, last_scan_time, scan_status, scan_history
+    if not INGEST_TOKEN or request.headers.get('X-Ingest-Token') != INGEST_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    data = request.get_json(force=True, silent=True) or {}
+    signals   = data.get('signals')
+    scan_time = data.get('scan_time')
+    if not isinstance(signals, list) or not scan_time:
+        return jsonify({"ok": False, "error": "bad payload"}), 400
+    latest_signals = signals
+    last_scan_time = scan_time
+    scan_status    = f"Hoàn tất lúc {scan_time} — {len(signals)} tín hiệu (LOCAL ingest, né ban IP)"
+    scan_history.insert(0, {"scan_time": scan_time, "signals": signals})
+    if len(scan_history) > MAX_HISTORY:
+        scan_history.pop()
+    print(f"[INGEST] Nhan {len(signals)} tin hieu tu may local luc {scan_time}")
+    return jsonify({"ok": True, "received": len(signals)})
+
 
 @flask_app.route('/signals_n7')
 def get_signals_n7():
