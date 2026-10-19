@@ -629,6 +629,32 @@ def ingest_v74():
     return jsonify({"ok": True, "received": len(signals)})
 
 
+@flask_app.route('/ingest/n7', methods=['POST'])
+def ingest_n7():
+    """[PATCH 2026-10-19] Nhan ket qua quet N7 tu may local khi Render dang bi
+    Binance ban IP (N7 chi dung REST, khong co WS du phong nhu V74). Dung
+    CHUNG schema voi /signals_n7 (symbol, price, combo, signal_date, status,
+    daily_return_pct, avg_body_pct, target_price, time). Bao ve bang header
+    X-Ingest-Token phai khop bien moi truong INGEST_TOKEN (dung chung voi
+    /ingest/v74)."""
+    global latest_signals_n7, last_scan_time_n7, scan_status_n7, scan_history_n7
+    if not INGEST_TOKEN or request.headers.get('X-Ingest-Token') != INGEST_TOKEN:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    data = request.get_json(force=True, silent=True) or {}
+    signals   = data.get('signals')
+    scan_time = data.get('scan_time')
+    if not isinstance(signals, list) or not scan_time:
+        return jsonify({"ok": False, "error": "bad payload"}), 400
+    latest_signals_n7 = signals
+    last_scan_time_n7 = scan_time
+    scan_status_n7    = f"Hoàn tất lúc {scan_time} — {len(signals)} tín hiệu (LOCAL ingest, né ban IP)"
+    scan_history_n7.insert(0, {"scan_time": scan_time, "signals": signals})
+    if len(scan_history_n7) > MAX_HISTORY:
+        scan_history_n7.pop()
+    print(f"[INGEST N7] Nhan {len(signals)} tin hieu tu may local luc {scan_time}")
+    return jsonify({"ok": True, "received": len(signals)})
+
+
 @flask_app.route('/signals_n7')
 def get_signals_n7():
     """[PATCH 2026-10-18] Tuong tu /signals nhung cho keo N7 (quet song song V74)."""
