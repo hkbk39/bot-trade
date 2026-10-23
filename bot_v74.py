@@ -283,11 +283,9 @@ def get_delisting_blocklist():
 #          Close < BB giua) sau signal_close_ms -> can DUNG 7 nen H1 lien
 #          tiep Close < BB giua, than nen TB <=5% -> READY (gia vao du
 #          kien = Close nen thu 7).
-#   [2026-10-23] Chi gui cho app cac tin hieu da READY (nen du 7 nen, san
-#   sang vao lenh). WAITING_DIP (moi khop combo, con cho dip, chua nen) van
-#   theo doi NGAM trong n7_pending de tien trien qua cac lan quet, nhung
-#   KHONG dua vao signals_json gui app nua (giong V74: chi hien tin hieu da
-#   dat day du dieu kien).
+#   Hien thi CA tin hieu dang WAITING_DIP (moi phat hien, cho dip) VA
+#   READY (sap/du dieu kien vao) de app thay duoc tien trien, khac V74
+#   (V74 chi hien tin hieu dat day du dieu kien pump+squeeze ngay luc quet).
 # ============================================================
 DAY_MS_N7  = 86_400_000
 HOUR_MS_N7 = 3_600_000
@@ -545,12 +543,10 @@ def run_n7_standard():
             if p["status"] == "READY" and now_ms - int(p["contraction_end_ms"]) > max_delay_ms:
                 n7_pending.pop(key, None)
 
-        # 3) build JSON cho app - CHI gui tin hieu da READY (nen du, san sang
-        #    vao lenh); WAITING_DIP van theo doi ngam trong n7_pending
+        # 3) build JSON cho app - hien CA WAITING_DIP (tin hieu moi, cho dip)
+        #    VA READY (du dieu kien, sap vao) de thay tien trien theo thoi gian
         signals_json = []
         for key, p in list(n7_pending.items()):
-            if p["status"] != "READY":
-                continue
             try:
                 price = _n7_ticker_price(p["symbol"])
             except Exception:
